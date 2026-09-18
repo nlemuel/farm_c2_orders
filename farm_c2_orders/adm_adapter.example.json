@@ -1,0 +1,39 @@
+{
+  "verified": false,
+  "authenticated_selector": "",
+  "login_url_pattern": "/login(?:[/?#]|$)",
+  "mode": "dom",
+  "max_pages": 500,
+  "dom": {
+    "table_selector": "",
+    "ready_selector": "",
+    "empty_selector": "",
+    "next_selector": "",
+    "last_page_selector": "",
+    "single_page": false,
+    "columns": {
+      "order_id": "",
+      "codent": "",
+      "email": "",
+      "valor": "",
+      "data_hora": "",
+      "status": ""
+    }
+  },
+  "api": {
+    "url": "",
+    "page_param": "",
+    "first_page": 1,
+    "items_path": "",
+    "total_pages_path": "",
+    "params": {},
+    "fields": {
+      "order_id": "",
+      "codent": "",
+      "email": "",
+      "valor": "",
+      "data_hora": "",
+      "status": ""
+    }
+  }
+}

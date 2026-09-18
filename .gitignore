@@ -1,0 +1,11 @@
+.env
+credentials/
+auth/
+playwright_profile/
+cookies.json
+storage_state.json
+logs/
+__pycache__/
+*.pyc
+venv/
+.venv/

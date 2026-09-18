@@ -1,0 +1,23 @@
+{
+  "verified": true,
+  "authenticated_selector": "#adm_adm-payment_index > div > div > div:nth-child(2) > div > h1",
+  "login_url_pattern": "/login(?:[/?#]|$)",
+  "mode": "dom",
+  "max_pages": 500,
+  "dom": {
+    "table_selector": "#myTable",
+    "ready_selector": "h2.h6:has(span.searched_number)",
+   "empty_selector": "h2.h6:has(span.searched_number):has-text('Exibidos 0 de 0 resultados')",
+    "next_selector": "a.page-link[rel='next']",
+    "last_page_selector": "span.page-link:text-is('»')",
+    "single_page": false,
+    "columns": {
+      "order_id": "Id",
+      "codent": "CodEnt",
+      "email": "Email",
+      "valor": "Valor",
+      "data_hora": "Última atualização",
+      "status": "Status"
+    }
+  }
+}
