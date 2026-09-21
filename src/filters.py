@@ -47,10 +47,10 @@ def validate(raw, tz):
     return list(orders.values())
 
 
-def select(orders, period, portfolios, processed):
+def select(orders, period, portfolios, processed, portfolio='Farm C2'):
     start, end = period
     eligible = [o for o in orders if start <= o.data_hora <= end
-                and portfolios.get(o.codent) == 'Farm C2' and o.status in ALLOWED]
+                and portfolios.get(o.codent) == portfolio and o.status in ALLOWED]
     new = sorted((o for o in eligible if o.order_id not in processed),
                  key=lambda o: (o.data_hora, o.order_id))
     return new, len(eligible), len(eligible) - len(new)

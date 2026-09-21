@@ -29,8 +29,11 @@ def record(oid='123', **kw):
 class MemorySheets(SheetsClient):
     def __init__(self):
         super().__init__(Config(), transport=Mock())
-        self.grids = {'NICOLAS': [list(DEST_HEADERS)], 'LOG_AUTOMACAO': [list(LOG_HEADERS)]}
+        self.grids = {'NICOLAS': [list(DEST_HEADERS)], 'LOG_AUTOMACAO': [list(LOG_HEADERS)], 'MARIA': [list(DEST_HEADERS)]}
         self.posts = []
+
+    def check_template(self, sheet_name=None):
+        pass
 
     def metadata(self):
         return {name: {'title': name, 'sheetId': i, 'gridProperties': {'rowCount': 1000, 'columnCount': 20}}
@@ -191,12 +194,12 @@ class SheetsTests(unittest.TestCase):
         self.assertEqual(len(sheets.posts), 1)
         self.assertIn('addSheet', sheets.posts[0]['requests'][0])
 
-    def test_destination_only_four_columns(self):
+    def test_destination_only_five_columns(self):
         sheets = MemorySheets()
         sheets.commit(validate([record(email='=x@example.com')], TZ), NOW)
         req = next(r['updateCells'] for r in sheets.posts[0]['requests']
                    if 'updateCells' in r and r['updateCells']['start']['sheetId'] == 0)
-        self.assertEqual(len(req['rows'][0]['values']), 4)
+        self.assertEqual(len(req['rows'][0]['values']), 5)
         self.assertEqual(req['fields'], 'userEnteredValue')
         self.assertEqual(req['rows'][0]['values'][2], {'userEnteredValue': {'stringValue': '=x@example.com'}})
 

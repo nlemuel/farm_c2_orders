@@ -60,8 +60,11 @@ class SheetsClient:
         self.destination = config.get('DESTINO_SPREADSHEET_ID', '1OM0wnMFNN4zysciJPxh1iVgUUT9kCSLzw4h_g1Cf6wg')
         self.dest_name = config.get('DESTINO_SHEET', 'NICOLAS')
         self.log_name = config.get('LOG_SHEET', 'LOG_AUTOMACAO')
-        if self.dest_name == self.log_name:
-            raise ConfigError('Abas de destino e log devem ser diferentes.')
+        self.routes = {'Farm C2': self.dest_name,
+                       'Farm C1': config.get('DESTINO_SHEET_C1', 'MARIA')}
+        names = [*self.routes.values(), self.log_name]
+        if any(not name.strip() for name in names) or len(set(names)) != len(names):
+            raise ConfigError('Abas de Farm C2, Farm C1 e log devem ser preenchidas e diferentes.')
 
     def request(self, method, spreadsheet, suffix='', **kwargs):
         url = f'https://sheets.googleapis.com/v4/spreadsheets/{quote(spreadsheet, safe="")}{suffix}'
@@ -123,10 +126,10 @@ class SheetsClient:
     def snapshot(self):
         meta = self.metadata()
         if self.dest_name not in meta:
-            raise DataError('Aba de destino não existe.')
+            raise DataError(f'Aba de destino {self.dest_name!r} não existe.')
         dest = self.values(self.destination, self.dest_name, 'A:D')
         if not dest or dest[0] != DEST_HEADERS:
-            raise DataError('Cabeçalhos A:D de NICOLAS não correspondem ao esperado.')
+            raise DataError(f'Cabeçalhos A:D de {self.dest_name!r} não correspondem ao esperado.')
         log = self.values(self.destination, self.log_name, 'A:H') if self.log_name in meta else []
         if log and log[0] != LOG_HEADERS:
             raise DataError('Cabeçalhos de LOG_AUTOMACAO não correspondem ao esperado.')
@@ -142,9 +145,10 @@ class SheetsClient:
     def processed(self):
         return self.snapshot()[3]
 
-    def check_template(self):
+    def check_template(self, sheet_name=None):
         """E2 é o modelo nativo da lista suspensa; somente leitura."""
-        title = "'" + self.dest_name.replace("'", "''") + "'!E1:E2"
+        sheet_name = sheet_name or self.dest_name
+        title = "'" + sheet_name.replace("'", "''") + "'!E1:E2"
         body = self.request('GET', self.destination, params={
             'ranges': title,
             'fields': 'sheets.data.rowData.values(userEnteredValue,dataValidation)'})
@@ -155,51 +159,92 @@ class SheetsClient:
             condition = rule['condition']
             options = [v.get('userEnteredValue') for v in condition.get('values', [])]
         except (KeyError, IndexError, TypeError):
-            raise DataError('Configure o cabeçalho CHECK em E1 e a lista suspensa modelo em E2.') from None
+            raise DataError(f'Na aba {sheet_name!r}, configure CHECK em E1 e a lista suspensa modelo em E2.') from None
         if header.strip().upper() != 'CHECK':
-            raise DataError('O cabeçalho da coluna E deve ser CHECK.')
+            raise DataError(f'O cabeçalho E1 da aba {sheet_name!r} deve ser CHECK.')
         if condition.get('type') != 'ONE_OF_LIST' or DEFAULT_CHECK not in options:
-            raise DataError('A lista suspensa de E2 precisa conter exatamente a opção NÃO CHAMEI AINDA.')
+            raise DataError(f'A lista de {sheet_name!r}!E2 precisa conter exatamente NÃO CHAMEI AINDA.')
+
+    def snapshot_for_targets(self, targets):
+        """Valida os destinos solicitados e lê o log global, incluindo IDs antigos."""
+        if set(targets) - set(self.routes.values()):
+            raise ConfigError('Destino não configurado para Farm C1/C2.')
+        meta, dest, log, processed = self.snapshot()
+        destinations = {self.dest_name: dest}
+        for title in targets:
+            if title == self.dest_name:
+                continue
+            if title not in meta:
+                raise DataError(f'Aba de destino {title!r} não existe.')
+            rows = self.values(self.destination, title, 'A:D')
+            if not rows or rows[0] != DEST_HEADERS:
+                raise DataError(f'Cabeçalhos A:D de {title!r} não correspondem ao esperado: DATA DA ORDEM, CODENT, E-MAIL, VALOR.')
+            destinations[title] = rows
+        return meta, destinations, log, processed
 
     def commit(self, orders, executed_at):
-        # Releitura imediatamente antes da escrita; evita usar um snapshot antigo.
-        meta, dest, log, processed = self.snapshot()
-        orders = [o for o in orders if o.order_id not in processed]
-        if orders:
-            self.check_template()
+        # Compatibilidade com chamadas antigas de apenas Farm C2.
+        return self.commit_batches({self.dest_name: orders}, executed_at)[self.dest_name]
+
+    def commit_batches(self, batches, executed_at):
+        # Um snapshot e um batchUpdate para NICOLAS + MARIA + log.
+        meta, destinations, log, processed = self.snapshot_for_targets(batches)
+        fresh, seen = {}, set()
+        for title, orders in batches.items():
+            fresh[title] = []
+            for order in orders:
+                if order.order_id in seen:
+                    raise DataError('ORDER_ID repetido entre lotes; nenhuma escrita iniciada.')
+                seen.add(order.order_id)
+                if order.order_id not in processed:
+                    fresh[title].append(order)
+        for title, orders in fresh.items():
+            if orders:
+                self.check_template(title)
         requests = []
-        destination = meta[self.dest_name]
+        total = sum(len(orders) for orders in fresh.values())
         if self.log_name not in meta:
             new_id = max((s['sheetId'] for s in meta.values()), default=0) + 1
-            log_meta = {'sheetId': new_id, 'gridProperties': {'rowCount': max(1000, len(orders)+1), 'columnCount': 8}}
+            log_meta = {'sheetId': new_id, 'gridProperties': {
+                'rowCount': max(1000, total + 1), 'columnCount': 8}}
             requests.append({'addSheet': {'properties': dict(log_meta, title=self.log_name)}})
         else:
             log_meta = meta[self.log_name]
         if not log:
             requests.append(update(log_meta['sheetId'], 0, [LOG_HEADERS]))
-        for sheet, needed in ((destination, len(dest) + len(orders)),
-                              (log_meta, max(1, len(log)) + len(orders))):
+
+        def ensure_rows(sheet, needed):
             capacity = sheet['gridProperties']['rowCount']
             if needed > capacity:
-                requests.append({'appendDimension': {'sheetId': sheet['sheetId'], 'dimension': 'ROWS', 'length': needed - capacity}})
-        if orders:
-            # Apenas E das linhas novas; nunca copia valores antigos nem toca F.
+                requests.append({'appendDimension': {'sheetId': sheet['sheetId'],
+                    'dimension': 'ROWS', 'length': needed - capacity}})
+
+        ensure_rows(log_meta, max(1, len(log)) + total)
+        log_rows = []
+        for title, orders in fresh.items():
+            if not orders:
+                continue
+            destination = meta[title]
+            start = len(destinations[title])
+            ensure_rows(destination, start + len(orders))
             source_range = {'sheetId': destination['sheetId'], 'startRowIndex': 1,
                             'endRowIndex': 2, 'startColumnIndex': 4, 'endColumnIndex': 5}
-            target_range = {'sheetId': destination['sheetId'], 'startRowIndex': len(dest),
-                            'endRowIndex': len(dest) + len(orders),
+            target_range = {'sheetId': destination['sheetId'], 'startRowIndex': start,
+                            'endRowIndex': start + len(orders),
                             'startColumnIndex': 4, 'endColumnIndex': 5}
             for paste_type in ('PASTE_FORMAT', 'PASTE_DATA_VALIDATION'):
                 requests.append({'copyPaste': {'source': source_range,
                     'destination': target_range, 'pasteType': paste_type,
                     'pasteOrientation': 'NORMAL'}})
-            requests.append(update(destination['sheetId'], len(dest), [
-                [o.data_hora.strftime('%d/%m/%Y'), o.codent, o.email, float(o.valor), DEFAULT_CHECK] for o in orders]))
-            requests.append(update(log_meta['sheetId'], max(1, len(log)), [
+            requests.append(update(destination['sheetId'], start, [
+                [o.data_hora.strftime('%d/%m/%Y'), o.codent, o.email,
+                 float(o.valor), DEFAULT_CHECK] for o in orders]))
+            log_rows.extend([
                 [o.order_id, o.data_hora.isoformat(), o.codent, o.email, float(o.valor),
-                 o.status, executed_at.isoformat(), 'RUN'] for o in orders]))
+                 o.status, executed_at.isoformat(), 'RUN'] for o in orders])
+        if log_rows:
+            requests.append(update(log_meta['sheetId'], max(1, len(log)), log_rows))
         if requests:
-            # Um batchUpdate é atômico: destino, criação da aba e log juntos.
-            # Sem retry automático de escrita: timeout pode significar sucesso remoto.
+            # Não faz retry cego: ambas as abas e o log são atômicos na mesma planilha.
             self.request('POST', self.destination, ':batchUpdate', json={'requests': requests})
-        return len(orders)
+        return {title: len(orders) for title, orders in fresh.items()}

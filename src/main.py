@@ -5,7 +5,7 @@ from .filters import select, validate, window
 
 
 def parser():
-    result = argparse.ArgumentParser(description='Ordens Farm C2 → Google Sheets')
+    result = argparse.ArgumentParser(description='Ordens Farm C1/C2 → Google Sheets')
     group = result.add_mutually_exclusive_group()
     group.add_argument('--login', action='store_true', help='Login manual/renovação do ADM')
     group.add_argument('--test', action='store_true', help='Somente leitura (padrão)')
@@ -32,16 +32,27 @@ def pipeline(config, mode, logger):
         raw = collect(context, page, config, adapter, logger)
         orders = validate(raw, config.tz)
         sheets = SheetsClient(config)
-        fresh, eligible, duplicates = select(orders, period, sheets.portfolios(), sheets.processed())
-        logger.info('encontradas=%d farm_c2=%d duplicidades=%d novas=%d', len(raw), eligible, duplicates, len(fresh))
-        print(f'\nMODO {mode} — FARM C2\nSessão ADM: OK')
+        portfolios = sheets.portfolios()
+        processed = sheets.snapshot_for_targets(sheets.routes.values())[3]
+        # O modo teste também valida os modelos de CHECK; apenas leituras.
+        for title in sheets.routes.values():
+            sheets.check_template(title)
+        batches = {}
+        print(f'\nMODO {mode} — FARM C1/C2\nSessão ADM: OK')
         print(f'Janela: {period[0]:%d/%m/%Y %H:%M} → {period[1]:%d/%m/%Y %H:%M}')
-        print(f'Ordens encontradas: {len(raw)}\nFarm C2: {eligible}\nJá processadas: {duplicates}\nNovas: {len(fresh)}')
+        print(f'Ordens encontradas: {len(raw)}')
+        for portfolio, title in sheets.routes.items():
+            fresh, eligible, duplicates = select(orders, period, portfolios, processed, portfolio=portfolio)
+            batches[title] = fresh
+            logger.info('carteira=%s destino=%s elegiveis=%d duplicidades=%d novas=%d',
+                        portfolio, title, eligible, duplicates, len(fresh))
+            print(f'\n{portfolio} → {title}\nElegíveis: {eligible}\nJá processadas: {duplicates}\nNovas: {len(fresh)}')
+            if mode == 'TEST':
+                print('DATA | CODENT | E-MAIL (mascarado) | VALOR | CHECK')
+                for o in fresh:
+                    value = f'{o.valor:,.2f}'.replace(',', '_').replace('.', ',').replace('_', '.')
+                    print(f'{o.data_hora:%d/%m/%Y} | {o.codent} | {mask_email(o.email)} | R$ {value} | NÃO CHAMEI AINDA')
         if mode == 'TEST':
-            print('\nDATA | CODENT | E-MAIL (mascarado) | VALOR')
-            for o in fresh:
-                value = f'{o.valor:,.2f}'.replace(',', '_').replace('.', ',').replace('_', '.')
-                print(f'{o.data_hora:%d/%m/%Y} | {o.codent} | {mask_email(o.email)} | R$ {value}')
             logger.info('linhas_inseridas=0')
             print('Nenhuma alteração foi realizada nas planilhas.')
         else:
@@ -56,9 +67,12 @@ def pipeline(config, mode, logger):
             except Exception:
                 pass
             ensure_session(page, config, adapter)
-            inserted = sheets.commit(fresh, datetime.now(config.tz))
-            logger.info('linhas_inseridas=%d', inserted)
-            print(f'EXECUÇÃO CONCLUÍDA\nNovas inseridas: {inserted}\nGoogle Sheets: OK\nLOG_AUTOMACAO: OK')
+            inserted = sheets.commit_batches(batches, datetime.now(config.tz))
+            print('EXECUÇÃO CONCLUÍDA')
+            for title, count in inserted.items():
+                logger.info('destino=%s linhas_inseridas=%d', title, count)
+                print(f'{title}: {count} novas inseridas')
+            print('Google Sheets: OK\nLOG_AUTOMACAO: OK')
 
 
 def main(argv=None):
