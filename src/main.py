@@ -29,8 +29,13 @@ def pipeline(config, mode, logger):
             return
         period = window(now)
         logger.info('janela=%s ate %s', *[d.isoformat() for d in period])
-        raw = collect(context, page, config, adapter, logger)
+        raw = collect(context, page, config, adapter, logger, period=period)
         orders = validate(raw, config.tz)
+        for status in ('AGUARDANDO', 'EM PROCESSO'):
+            found = [o for o in orders if o.status == status]
+            inside = [o for o in found if period[0] <= o.data_hora <= period[1]]
+            logger.info('status=%s coletadas=%d na_janela=%d', status, len(found), len(inside))
+            print(f'{status}: {len(found)} coletadas; {len(inside)} na janela por Última atualização.')
         sheets = SheetsClient(config)
         portfolios = sheets.portfolios()
         processed = sheets.snapshot_for_targets(sheets.routes.values())[3]
