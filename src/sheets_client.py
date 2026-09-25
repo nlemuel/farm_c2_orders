@@ -182,6 +182,35 @@ class SheetsClient:
             destinations[title] = rows
         return meta, destinations, log, processed
 
+    def ranking_requests(self, meta, destinations, log, fresh):
+        from .lead_ranking import plan_sheet
+        def column(index):
+            result = ''
+            while index:
+                index, remainder = divmod(index - 1, 26)
+                result = chr(65 + remainder) + result
+            return result
+        ranges = ["'" + title.replace("'", "''") + "'!A1:" + column(meta[title]['gridProperties']['columnCount']) + str(min(len(rows) + 1, meta[title]['gridProperties']['rowCount']))
+                  for title, rows in destinations.items() if title in fresh]
+        body = self.request('GET', self.destination, params={
+            'ranges': ranges,
+            'fields': 'sheets(properties,conditionalFormats,data(rowData(values(userEnteredValue,effectiveValue,dataValidation))))'})
+        requests = []
+        for sheet in body.get('sheets', []):
+            title = sheet['properties']['title']
+            if title not in fresh:
+                continue
+            count = len(destinations[title])
+            rows = sheet.get('data', [{}])[0].get('rowData', [])
+            if len(rows) < count or (len(rows) > count and any(c.get('userEnteredValue') for c in rows[count].get('values', [])[:4])):
+                raise DataError('Linhas da planilha mudaram durante a leitura; repita --test.')
+            planned, summary = plan_sheet(sheet, rows[:count], log, fresh[title],
+                                          legacy_year=int(self.config.get('LEGACY_DATE_YEAR', '2026')))
+            requests.extend(planned)
+        if len([s for s in body.get('sheets', []) if s['properties']['title'] in fresh]) != len(fresh):
+            raise DataError('Não foi possível conferir todas as abas para ranking.')
+        return requests
+
     def commit(self, orders, executed_at):
         # Compatibilidade com chamadas antigas de apenas Farm C2.
         return self.commit_batches({self.dest_name: orders}, executed_at)[self.dest_name]
@@ -201,6 +230,7 @@ class SheetsClient:
         for title, orders in fresh.items():
             if orders:
                 self.check_template(title)
+        ranking = self.ranking_requests(meta, destinations, log, fresh)
         requests = []
         total = sum(len(orders) for orders in fresh.values())
         if self.log_name not in meta:
@@ -244,6 +274,7 @@ class SheetsClient:
                  o.status, executed_at.isoformat(), 'RUN'] for o in orders])
         if log_rows:
             requests.append(update(log_meta['sheetId'], max(1, len(log)), log_rows))
+        requests.extend(ranking)
         if requests:
             # Não faz retry cego: ambas as abas e o log são atômicos na mesma planilha.
             self.request('POST', self.destination, ':batchUpdate', json={'requests': requests})

@@ -53,11 +53,14 @@ def pipeline(config, mode, logger):
                         portfolio, title, eligible, duplicates, len(fresh))
             print(f'\n{portfolio} → {title}\nElegíveis: {eligible}\nJá processadas: {duplicates}\nNovas: {len(fresh)}')
             if mode == 'TEST':
-                print('DATA | CODENT | E-MAIL (mascarado) | VALOR | CHECK')
+                print('DATA | CODENT | E-MAIL (mascarado) | VALOR | CHECK | STATUS ADM')
                 for o in fresh:
                     value = f'{o.valor:,.2f}'.replace(',', '_').replace('.', ',').replace('_', '.')
-                    print(f'{o.data_hora:%d/%m/%Y} | {o.codent} | {mask_email(o.email)} | R$ {value} | NÃO CHAMEI AINDA')
+                    print(f'{o.data_hora:%d/%m/%Y} | {o.codent} | {mask_email(o.email)} | R$ {value} | NÃO CHAMEI AINDA | {o.status}')
         if mode == 'TEST':
+            meta, dests, log, _ = sheets.snapshot_for_targets(batches)
+            sheets.ranking_requests(meta, dests, log, batches)
+            print('STATUS ADM: status na coleta; ranking: data crescente, valor decrescente dentro da data.')
             logger.info('linhas_inseridas=0')
             print('Nenhuma alteração foi realizada nas planilhas.')
         else:
