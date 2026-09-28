@@ -1,4 +1,6 @@
 import json
+import re
+from copy import deepcopy
 from datetime import datetime
 from urllib.parse import quote
 from .utils import ConfigError, DataError, WriteUncertain, atomic_secret, identifier
@@ -77,7 +79,20 @@ class SheetsClient:
         if response.status_code >= 400:
             if method == 'POST' and response.status_code >= 500:
                 raise WriteUncertain('Resposta incerta do Sheets. Execute --test antes de tentar novamente.')
-            raise ConfigError(f'Google Sheets retornou HTTP {response.status_code}. Verifique permissões/configuração.')
+            context = f'{method} {suffix or "metadados"}'
+            hint = ''
+            if response.status_code == 400:
+                try:
+                    message = response.json().get('error', {}).get('message', '')
+                    match = re.search(r'Invalid requests\[(\d+)\]\.(\w+)', message)
+                    if match:
+                        context += f', operação {match[1]} ({match[2]})'
+                    if 'filtered out row' in message:
+                        hint = ' Há linhas ocultas por filtro na faixa de origem ou destino.'
+                except (ValueError, AttributeError, TypeError):
+                    pass
+            # Do not print raw API errors: they can echo cell contents or URLs.
+            raise ConfigError(f'Google Sheets retornou HTTP {response.status_code} em {context}.{hint} Verifique configuração e filtros.')
         try:
             return response.json()
         except ValueError:
@@ -86,8 +101,9 @@ class SheetsClient:
             raise DataError('Resposta inválida do Google Sheets.') from None
 
     def metadata(self):
-        payload = self.request('GET', self.destination, params={'fields': 'sheets.properties'})
-        return {s['properties']['title']: s['properties'] for s in payload.get('sheets', [])}
+        payload = self.request('GET', self.destination, params={'fields': 'sheets(properties,basicFilter)'})
+        return {s['properties']['title']: dict(s['properties'], **({'basicFilter': s['basicFilter']} if s.get('basicFilter') else {}))
+                for s in payload.get('sheets', [])}
 
     def values(self, spreadsheet, title, columns, render='FORMULA'):
         a1 = "'" + title.replace("'", "''") + "'!" + columns
@@ -231,7 +247,11 @@ class SheetsClient:
             if orders:
                 self.check_template(title)
         ranking = self.ranking_requests(meta, destinations, log, fresh)
-        requests = []
+        # Native copyPaste/sort cannot operate on filtered-out rows. Remove and
+        # restore the exact basic filters in the SAME atomic batch; never send
+        # clearBasicFilter on its own, including when a later operation fails.
+        filters = [deepcopy(meta[title]['basicFilter']) for title in fresh if meta[title].get('basicFilter')]
+        requests = [{'clearBasicFilter': {'sheetId': f['range']['sheetId']}} for f in filters]
         total = sum(len(orders) for orders in fresh.values())
         if self.log_name not in meta:
             new_id = max((s['sheetId'] for s in meta.values()), default=0) + 1
@@ -275,6 +295,7 @@ class SheetsClient:
         if log_rows:
             requests.append(update(log_meta['sheetId'], max(1, len(log)), log_rows))
         requests.extend(ranking)
+        requests.extend({'setBasicFilter': {'filter': f}} for f in filters)
         if requests:
             # Não faz retry cego: ambas as abas e o log são atômicos na mesma planilha.
             self.request('POST', self.destination, ':batchUpdate', json={'requests': requests})
