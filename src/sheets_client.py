@@ -198,8 +198,70 @@ class SheetsClient:
             destinations[title] = rows
         return meta, destinations, log, processed
 
+    def school_names(self, codes):
+        """Resolve requested CODENTs from carteira columns A:B; never guess names."""
+        requested = {identifier(code) for code in codes}
+        if not requested:
+            return {}
+        title = self.config.get('CARTEIRA_SHEET', 'Escolas')
+        meta = self.request('GET', self.source, params={'fields': 'sheets.properties'})
+        matches = [x['properties'] for x in meta.get('sheets', []) if x['properties']['title'] == title]
+        if len(matches) != 1:
+            raise DataError('Aba de carteiras não encontrada para buscar o nome do colégio.')
+        limit = matches[0]['gridProperties']['rowCount']
+        rows = self.values(self.source, title, f'A1:B{limit}', render='UNFORMATTED_VALUE')
+        if not rows or len(rows[0]) < 2 or str(rows[0][0]).strip().casefold() != 'codent' or str(rows[0][1]).strip().casefold() != 'nome da escola':
+            raise DataError('Carteira deve conter Codent em A e Nome da Escola em B.')
+        names = {}
+        for row in rows[1:]:
+            if not row or not str(row[0]).strip():
+                continue
+            code = identifier(row[0], field='CODENT', location='carteira')
+            if code not in requested:
+                continue
+            name = str(row[1]).strip() if len(row) > 1 else ''
+            if code in names and names[code] != name:
+                raise DataError(f'CODENT {code} possui nomes de colégio divergentes na carteira.')
+            names[code] = name
+        missing = requested - {code for code, name in names.items() if name}
+        if missing:
+            raise DataError(f'Nome de colégio ausente na carteira para {len(missing)} CODENT(s); nenhuma escrita iniciada.')
+        return names
+
+    def school_requests(self, sheet, rows, orders, names):
+        from .lead_ranking import value, put
+        title = sheet['properties']['title']
+        col = 9 if title == self.dest_name else 10
+        sid = sheet['properties']['sheetId']
+        header_cells = rows[0].get('values', [])
+        header = value(header_cells[col]) if len(header_cells) > col else ''
+        if header not in ('', 'COLÉGIO'):
+            raise DataError(f'A coluna do COLÉGIO em {title} já possui outro cabeçalho.')
+        if not header and any(len(r.get('values', [])) > col and r['values'][col].get('userEnteredValue') for r in rows[1:]):
+            raise DataError(f'A coluna do COLÉGIO em {title} contém dados sem cabeçalho.')
+        result = []
+        capacity = sheet['properties']['gridProperties']['columnCount']
+        if capacity <= col:
+            result.append({'appendDimension': {'sheetId': sid, 'dimension': 'COLUMNS', 'length': col + 1 - capacity}})
+        if not header:
+            result += [
+                {'copyPaste': {'source': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': col - 1, 'endColumnIndex': col},
+                    'destination': {'sheetId': sid, 'startRowIndex': 0, 'endRowIndex': 1, 'startColumnIndex': col, 'endColumnIndex': col + 1}, 'pasteType': 'PASTE_FORMAT'}},
+                put(sid, 0, col, 'COLÉGIO'),
+                {'updateDimensionProperties': {'range': {'sheetId': sid, 'dimension': 'COLUMNS', 'startIndex': col, 'endIndex': col + 1},
+                    'properties': {'pixelSize': 420}, 'fields': 'pixelSize'}},
+                {'repeatCell': {'range': {'sheetId': sid, 'startRowIndex': 1, 'startColumnIndex': col, 'endColumnIndex': col + 1},
+                    'cell': {'userEnteredFormat': {'wrapStrategy': 'CLIP', 'horizontalAlignment': 'LEFT'}}, 'fields': 'userEnteredFormat(wrapStrategy,horizontalAlignment)'}}]
+        for index, order in enumerate(orders, len(rows)):
+            code = identifier(order.codent)
+            if not names.get(code):
+                raise DataError('Nome do colégio ausente para nova ordem; nenhuma escrita iniciada.')
+            result.append(put(sid, index, col, names[code]))
+        return result
+
     def ranking_requests(self, meta, destinations, log, fresh):
         from .lead_ranking import plan_sheet
+        names = self.school_names(o.codent for orders in fresh.values() for o in orders)
         def column(index):
             result = ''
             while index:
@@ -222,6 +284,11 @@ class SheetsClient:
                 raise DataError('Linhas da planilha mudaram durante a leitura; repita --test.')
             planned, summary = plan_sheet(sheet, rows[:count], log, fresh[title],
                                           legacy_year=int(self.config.get('LEGACY_DATE_YEAR', '2026')))
+            requests.extend(self.school_requests(sheet, rows[:count], fresh[title], names))
+            # The native sort moves the new school cells together with each order.
+            for operation in planned:
+                if 'sortRange' in operation:
+                    operation['sortRange']['range']['endColumnIndex'] = max(operation['sortRange']['range']['endColumnIndex'], 10 if title == self.dest_name else 11)
             requests.extend(planned)
         if len([s for s in body.get('sheets', []) if s['properties']['title'] in fresh]) != len(fresh):
             raise DataError('Não foi possível conferir todas as abas para ranking.')
@@ -300,3 +367,4 @@ class SheetsClient:
             # Não faz retry cego: ambas as abas e o log são atômicos na mesma planilha.
             self.request('POST', self.destination, ':batchUpdate', json={'requests': requests})
         return {title: len(orders) for title, orders in fresh.items()}
+
